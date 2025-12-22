@@ -11,7 +11,7 @@ simply use
 This is the general usage of the command:
 
 ```console
-upload_bitstream.py [-h] [-b BAUDRATE] [-p PORT] [-v] bitstream_file
+upload.py [-h] [-b BAUDRATE] [-p PORT] [-v] bitstream_file
 ```
 
 ### Example Use Case
@@ -22,7 +22,7 @@ upload_bitstream.py [-h] [-b BAUDRATE] [-p PORT] [-v] bitstream_file
 Uploading a bitstream:
 
 ```console
-./board.py -p /dev/ttyUSB0 bitstream.bin
+./upload.py -p /dev/ttyUSB0 bitstream.bin
 ```
 
 This uses the default baudrate of 57600 Baud.
