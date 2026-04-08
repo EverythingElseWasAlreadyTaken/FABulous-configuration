@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 
-import serial
 import argparse
+import fcntl
 import os
 import stat
+import struct
 import sys
+import termios
 from pathlib import Path
+
+import serial
 from loguru import logger
 
 DEFAULT_BAUDRATE = 57600
@@ -90,6 +94,34 @@ def read_bitstream_data(bitstream_file: str) -> bytearray:
     return data
 
 
+def set_custom_baudrate(ser, baudrate: int) -> None:
+    """Set a custom baud rate on Linux using termios.
+
+    :param ser: The serial port object.
+    :param baudrate: The custom baudrate to set.
+    """
+    TCGETS2 = 0x802C542A
+    TCSETS2 = 0x402C542B
+    BOTHER = 0o010000
+    CBAUD = 0o010017
+
+    # Get current serial port settings
+    buf = fcntl.ioctl(ser.fd, TCGETS2, b'\x00' * 44)
+
+    # Unpack the termios2 structure
+    data = list(struct.unpack('I' * 11, buf))
+
+    # Set custom speed flag
+    data[2] &= ~CBAUD
+    data[2] |= BOTHER
+    data[9] = baudrate  # input speed
+    data[10] = baudrate  # output speed
+
+    # Pack and set new settings
+    buf = struct.pack('I' * 11, *data)
+    fcntl.ioctl(ser.fd, TCSETS2, buf)
+
+
 def upload_bitstream(bitstream_file: str, baudrate: int, port: str) -> None:
     """Upload the bitstream to the eFPGA.
 
@@ -107,8 +139,16 @@ def upload_bitstream(bitstream_file: str, baudrate: int, port: str) -> None:
 
     logger.info("Uploading bitstream...")
 
-    with serial.Serial(port, baudrate) as ser:
-        ser.write(data)
+    # Try standard baud rate first
+    try:
+        with serial.Serial(port, baudrate) as ser:
+            ser.write(data)
+    except (ValueError, OSError, termios.error) as e:
+        # If standard baud rate fails, try custom baud rate
+        logger.info(f"Standard baud rate failed, attempting custom baud rate {baudrate}...")
+        with serial.Serial(port, 9600) as ser:  # Open with any standard rate first
+            set_custom_baudrate(ser, baudrate)
+            ser.write(data)
 
     logger.info("Bitstream transmitted!")
 
