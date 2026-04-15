@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 
 import argparse
-import fcntl
+import errno
 import os
 import stat
 import struct
 import sys
-import termios
 from pathlib import Path
 
 import serial
 from loguru import logger
+
+if os.name == "posix":
+    import fcntl
+    import termios
+else:
+    fcntl = None
+    termios = None
 
 DEFAULT_BAUDRATE = 57600
 DEFAULT_PORT = "/dev/ttyUSB0"
@@ -100,26 +106,40 @@ def set_custom_baudrate(ser, baudrate: int) -> None:
     :param ser: The serial port object.
     :param baudrate: The custom baudrate to set.
     """
+    if os.name != "posix" or fcntl is None or termios is None:
+        raise RuntimeError(
+            "Custom baud rate configuration is only supported on POSIX platforms."
+        )
+
+    # Linux termios2 ioctls and baud flags from asm-generic/termbits.h.
+    # The layout below assumes struct termios2 is 44 bytes on the target platform.
     TCGETS2 = 0x802C542A
     TCSETS2 = 0x402C542B
     BOTHER = 0o010000
     CBAUD = 0o010017
 
-    # Get current serial port settings
-    buf = fcntl.ioctl(ser.fd, TCGETS2, b'\x00' * 44)
+    # Offsets in Linux termios2:
+    # c_iflag(0), c_oflag(4), c_cflag(8), c_lflag(12),
+    # c_line(16), c_cc[19](17-35), c_ispeed(36), c_ospeed(40)
+    C_CFLAG_OFFSET = 8
+    C_ISPEED_OFFSET = 36
+    C_OSPEED_OFFSET = 40
 
-    # Unpack the termios2 structure
-    data = list(struct.unpack('I' * 11, buf))
+    fd = ser.fileno()
+
+    # Get current serial port settings
+    buf = bytearray(fcntl.ioctl(fd, TCGETS2, b"\x00" * 44))
 
     # Set custom speed flag
-    data[2] &= ~CBAUD
-    data[2] |= BOTHER
-    data[9] = baudrate  # input speed
-    data[10] = baudrate  # output speed
+    c_cflag = struct.unpack_from("I", buf, C_CFLAG_OFFSET)[0]
+    c_cflag &= ~CBAUD
+    c_cflag |= BOTHER
 
     # Pack and set new settings
-    buf = struct.pack('I' * 11, *data)
-    fcntl.ioctl(ser.fd, TCSETS2, buf)
+    struct.pack_into("I", buf, C_CFLAG_OFFSET, c_cflag)
+    struct.pack_into("I", buf, C_ISPEED_OFFSET, baudrate)
+    struct.pack_into("I", buf, C_OSPEED_OFFSET, baudrate)
+    fcntl.ioctl(fd, TCSETS2, bytes(buf))
 
 
 def upload_bitstream(bitstream_file: str, baudrate: int, port: str) -> None:
@@ -143,7 +163,16 @@ def upload_bitstream(bitstream_file: str, baudrate: int, port: str) -> None:
     try:
         with serial.Serial(port, baudrate) as ser:
             ser.write(data)
-    except (ValueError, OSError, termios.error) as e:
+    except (ValueError, OSError, termios.error if termios else OSError) as e:
+        termios_errno = e.args[0] if getattr(e, "args", None) else None
+        should_fallback = (
+            isinstance(e, ValueError)
+            or getattr(e, "errno", None) == errno.EINVAL
+            or termios_errno == errno.EINVAL
+        )
+        if not should_fallback:
+            raise
+
         # If standard baud rate fails, try custom baud rate
         logger.info(f"Standard baud rate failed, attempting custom baud rate {baudrate}...")
         with serial.Serial(port, 9600) as ser:  # Open with any standard rate first
