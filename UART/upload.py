@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import serial
+from serial.tools import list_ports
 from loguru import logger
 
 if os.name == "posix":
@@ -98,6 +99,72 @@ def read_bitstream_data(bitstream_file: str) -> bytearray:
         data = bytearray(f.read())
 
     return data
+
+
+def parse_usb_vid_pid(usb_id: str) -> tuple[int, int]:
+    """Parse a USB ID string in VID:PID format (hex)."""
+    parts = usb_id.split(":", 1)
+    if len(parts) != 2:
+        raise ValueError(
+            f"Invalid USB ID '{usb_id}'. Expected format is VID:PID (e.g. 0403:6001)."
+        )
+
+    try:
+        vid = int(parts[0], 16)
+        pid = int(parts[1], 16)
+    except ValueError as e:
+        raise ValueError(
+            f"Invalid USB ID '{usb_id}'. VID and PID must be hexadecimal numbers."
+        ) from e
+
+    if not (0 <= vid <= 0xFFFF and 0 <= pid <= 0xFFFF):
+        raise ValueError(
+            f"Invalid USB ID '{usb_id}'. VID and PID must be 16-bit hexadecimal values."
+        )
+
+    return vid, pid
+
+
+def resolve_port_by_usb_id(usb_id: str) -> str:
+    """Resolve a serial device path by USB VID:PID."""
+    vid, pid = parse_usb_vid_pid(usb_id)
+    matching_ports = [
+        port.device
+        for port in list_ports.comports()
+        if port.vid == vid and port.pid == pid and port.device
+    ]
+
+    if not matching_ports:
+        raise ValueError(
+            f"No serial device found for USB ID {vid:04x}:{pid:04x}."
+        )
+
+    if len(matching_ports) > 1:
+        ports = ", ".join(matching_ports)
+        raise ValueError(
+            f"Multiple devices found for USB ID {vid:04x}:{pid:04x}: {ports}"
+        )
+
+    return matching_ports[0]
+
+
+def resolve_target_port(port: str | None, usb_id: str | None) -> str:
+    """Resolve final device port from CLI options."""
+    if usb_id:
+        try:
+            return resolve_port_by_usb_id(usb_id)
+        except ValueError as e:
+            if port:
+                logger.warning(
+                    f"{e} Falling back to --port value '{port}'."
+                )
+                return port
+            raise
+
+    if port:
+        return port
+
+    return DEFAULT_PORT
 
 
 def set_custom_baudrate(ser, baudrate: int) -> None:
@@ -204,9 +271,16 @@ def __parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "-p",
         "--port",
-        help=f"Specifies the port. Defaults to {DEFAULT_PORT}",
+        help=f"Specifies the port. Defaults to {DEFAULT_PORT} unless --usb-id is used.",
         type=str,
-        default=DEFAULT_PORT,
+        default=None,
+    )
+    parser.add_argument(
+        "-u",
+        "--usb-id",
+        help="Specifies USB VID:PID (hex) to select a serial device, e.g. 0403:6001.",
+        type=str,
+        default=None,
     )
 
     parser.add_argument(
@@ -258,7 +332,13 @@ def main() -> None:
     """The main function containing the application logic"""
     args = __parse_arguments()
     setup_logger(args.verbose)
-    port = args.port
+
+    try:
+        port = resolve_target_port(args.port, args.usb_id)
+    except ValueError as e:
+        logger.error(e)
+        sys.exit(1)
+
     if not device_port_exists(port):
         exit()
     upload_bitstream(args.bitstream_file, args.baudrate, port)
